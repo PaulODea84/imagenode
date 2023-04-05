@@ -42,8 +42,8 @@ class HealthMonitor:
                                      / 3600), 2))  # = hours
         self.ram_size = str(round(psutil.virtual_memory().total
                               / (1024.0*1024.0)))  # = MB
-        self.tiny_image = np.zeros((3,3), dtype="uint8")  # tiny blank image
-        self.heartbeat_event_text = '|'.join([settings.nodename, 'Heartbeat'])
+        self.set_last_image(np.zeros((3,3,), dtype="uint8"))  # tiny blank image
+        self.heartbeat_event_text = '|'.join([settings.nodename, 'jpg','Heartbeat'])
         self.patience = settings.patience
         if settings.heartbeat:
             threading.Thread(daemon=True,
@@ -57,12 +57,17 @@ class HealthMonitor:
                                target=self.stall_watcher)
             self.stall_p.start()
 
+    def set_last_image(self, image):
+        self.image = image
+
     def send_heartbeat(self):
         """ send a heartbeat message to imagehub
         """
         text = self.heartbeat_event_text
-        text_and_image = (text, self.tiny_image)
+        text_and_image = (text, self.image)
         self.send_q.append(text_and_image)
+        print ('send_heartbeat {0}'.format(text))
+
 
     def stall_watcher(self, pid, patience):
         """ Watch the main process cpu_times.user; sys.exit() if not advancing

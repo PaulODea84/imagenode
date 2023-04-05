@@ -35,7 +35,11 @@ def main():
                 node.read_cameras()
             while len(node.send_q) > 0:  # send frames until send_q is empty
                 text, image = node.send_q.popleft()
-                hub_reply = node.send_frame(text, image)
+                try:                
+                    hub_reply = node.send_frame(text, image)
+                except Exception as ex:  # traceback will appear in log
+                    log.exception('Unanticipated error with no Exception handler.')
+                    print(ex)                    
                 node.process_hub_reply(hub_reply)
     except KeyboardInterrupt:
         log.warning('Ctrl-C was pressed.')
@@ -43,6 +47,7 @@ def main():
         log.warning('SIGTERM was received.')
     except Exception as ex:  # traceback will appear in log
         log.exception('Unanticipated error with no Exception handler.')
+        print(ex)
     finally:
         if 'node' in locals():
             node.closeall(settings) # close cameras, GPIO, files

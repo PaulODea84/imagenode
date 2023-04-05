@@ -28,6 +28,8 @@ from tools.utils import interval_timer
 from tools.nodehealth import HealthMonitor
 from tools.utils import versionCompare
 from pkg_resources import require
+import simplejpeg
+from time import monotonic
 
 
 class ImageNode:
@@ -48,31 +50,34 @@ class ImageNode:
 
     def __init__(self, settings):
         # set various node attributes; also check that numpy and OpenCV are OK
-        self.tiny_image = np.zeros((3, 3), dtype="uint8")  # tiny blank image
-        ret_code, jpg_buffer = cv2.imencode(
-            ".jpg", self.tiny_image, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
-        self.tiny_jpg = jpg_buffer  # matching tiny blank jpeg
         self.jpeg_quality = 95
+        self.tiny_image = np.zeros((3, 3, 3), dtype="uint8")  # tiny blank image
+        jpg_buffer     = simplejpeg.encode_jpeg(self.tiny_image, quality=self.jpeg_quality, 
+                                            colorspace='BGR')        
+        # self.tiny_image = np.zeros((3, 3,3), dtype="uint8")  # tiny blank image
+        # ret_code, jpg_buffer = cv2.imencode(
+        #     ".jpg", self.tiny_image, [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality])
+        # jpg_buffer     = simplejpeg.encode_jpeg(jpg_buffer, quality=self.jpeg_quality, 
+        #                                             colorspace='BGR')        
+        self.tiny_jpg = jpg_buffer  # matching tiny blank jpeg
         self.pid = os.getpid()  # get process ID of this program
 
         # open ZMQ link to imagehub
         self.sender = imagezmq.ImageSender(connect_to=settings.hub_address)
         self.sender.zmq_socket.setsockopt(zmq.LINGER, 0)  # prevents ZMQ hang on exit
 
+        #open ZMQ link to monitor images in real-time
+        self.monitor = imagezmq.ImageSender(connect_to=settings.monitor_address)
+        self.monitor.zmq_socket.setsockopt(zmq.LINGER, 0)
+
         # If settings.REP_watcher is True, pick the send_frame function
         #  that does time recording of each REQ and REP. Start REP_watcher
         #  thread. Set up deques to track REQ and REP times.
         self.patience = settings.patience  # how long to wait in seconds
-        if settings.send_type == 'image':  # set send function to image
-            if settings.REP_watcher:
-                self.send_frame = self.send_image_frame_REP_watcher
-            else:
-                self.send_frame = self.send_image_frame
-        else: # anything not spelled 'image' sets send function to jpg
-            if settings.REP_watcher:
-                self.send_frame = self.send_jpg_frame_REP_watcher
-            else:
-                self.send_frame = self.send_jpg_frame
+        if settings.REP_watcher:
+            self.send_frame = self.send_jpg_frame_REP_watcher
+        else:
+            self.send_frame = self.send_jpg_frame
         if settings.REP_watcher:  # set up deques & start thread to watch for REP
             threading.Thread(daemon=True, target=self.REP_watcher).start()
             self.REQ_sent_time = deque(maxlen=1)
@@ -92,16 +97,16 @@ class ImageNode:
 
         self.sensors = []  # need an empty list even if no sensors
         self.lights = []
-        if self.health.sys_type == 'RPi':  # set up GPIO & sensors
-            if settings.sensors or settings.lights:
-                global GPIO
-                import RPi.GPIO as GPIO
-                GPIO.setmode(GPIO.BCM)
-                GPIO.setwarnings(False)
-            if settings.sensors:   # is there at least one sensor in yaml file
-                self.setup_sensors(settings)
-            if settings.lights:   # is there at least one light in yaml file
-                self.setup_lights(settings)
+        # if self.health.sys_type == 'RPi':  # set up GPIO & sensors
+        #     if settings.sensors or settings.lights:
+        #         global GPIO
+        #         import RPi.GPIO as GPIO
+        #         GPIO.setmode(GPIO.BCM)
+        #         GPIO.setwarnings(False)
+        #     if settings.sensors:   # is there at least one sensor in yaml file
+        #         self.setup_sensors(settings)
+        #     if settings.lights:   # is there at least one light in yaml file
+        #         self.setup_lights(settings)
 
         # set up and start camera(s)
         self.camlist = []  # need an empty list if there are no cameras
@@ -152,20 +157,20 @@ class ImageNode:
             self.print_node_details(settings)
 
         # send an imagenode startup event message with system values
-        text = '|'.join([settings.nodename,
-                        'Restart',
-                        self.health.hostname,
-                        self.health.sys_type,
-                        self.health.ipaddress,
-                        self.health.ram_size,
-                        self.health.time_since_restart])
-        text_and_image = (text, self.tiny_image)
-        self.send_q.append(text_and_image)
+        # text = '|'.join([settings.nodename,
+        #                 'Restart',
+        #                 self.health.hostname,
+        #                 self.health.sys_type,
+        #                 self.health.ipaddress,
+        #                 self.health.ram_size,
+        #                 self.health.time_since_restart])
+        # text_and_image = (text, self.tiny_jpg)
+        # self.send_q.append(text_and_image)
 
     def print_node_details(self, settings):
         print('Node details after setup and camera test read:')
         print('  Node name:', settings.nodename)
-        print('  System Type:', self.health.sys_type)
+        #print('  System Type:', self.health.sys_type)
         for cam in self.camlist:
             print('  Camera:', cam.cam_type)
             print('    Resolution requested:', cam.resolution)
@@ -306,11 +311,27 @@ class ImageNode:
 
         Function self.send_frame() is set to this function if jpg option chosen
         """
-
-        ret_code, jpg_buffer = cv2.imencode(".jpg", image,
-                                            [int(cv2.IMWRITE_JPEG_QUALITY),
-                                             self.jpeg_quality])
-        hub_reply = self.sender.send_jpg(text, jpg_buffer)
+        message = text.split("|")
+        type = message[1]  # type is the second delimited field in text
+        t0 = type[0]  # the first character of type is unique & compares faster
+        jpg_buffer = None
+        monitor_message = False
+        if len(message) == 3 and message[2] == 'monitor':
+            monitor_message = True        
+        if t0 == 'j':
+            if monitor_message:
+                self.health.set_last_image(image)            
+            jpg_buffer  = simplejpeg.encode_jpeg(image, quality=95, 
+                                                    colorspace='BGR')             
+        else:
+            ret_code, jpg_buffer = cv2.imencode(".jpg", image,
+                                                 [int(cv2.IMWRITE_JPEG_QUALITY),
+                                               self.jpeg_quality])
+        hub_reply = 'OK'
+        if monitor_message:
+            hub_reply = self.monitor.send_jpg(message[0], jpg_buffer)
+        else:
+            hub_reply = self.sender.send_jpg(text, jpg_buffer)
         return hub_reply
 
     def send_image_frame(self, text, image):
@@ -333,16 +354,36 @@ class ImageNode:
         the (text, jpg_buffer) REQ has been set. See self.REP_watcher() method
         for details.
         """
-
-        ret_code, jpg_buffer = cv2.imencode(
-            ".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY),
-            self.jpeg_quality])
+        message = text.split("|")
+        type = message[1]  # type is the second delimited field in text
+        t0 = type[0]  # the first character of type is unique & compares faster
+        jpg_buffer = None
+        monitor_message = False
+        if len(message) == 3 and message[2] == 'monitor':
+            monitor_message = True
+        if t0 == 'j':
+            if monitor_message:
+                self.health.set_last_image(image)
+            jpg_buffer  = simplejpeg.encode_jpeg(image, quality=95, 
+                                                    colorspace='BGR')             
+        else:
+            ret_code, jpg_buffer = cv2.imencode(".jpg", image,
+                                                 [int(cv2.IMWRITE_JPEG_QUALITY),
+                                               self.jpeg_quality])
+        #hub_reply = self.sender.send_jpg(text, jpg_buffer)
+        # ret_code, jpg_buffer = cv2.imencode(
+        #     ".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY),
+        #     self.jpeg_quality])
         self.REQ_sent_time.append(datetime.utcnow())  # utcnow 2x faster than now
+        hub_reply = 'OK'
         try:
-            hub_reply = self.sender.send_jpg(text, jpg_buffer)
-        except:  # add more specific exception, e.g. ZMQError, after testing
-            print("Exception at sender.send_jpg in REP_watcher function.")
-            self. fix_comm_link()
+            if monitor_message:
+                hub_reply = self.monitor.send_jpg(message[0], jpg_buffer)
+            else:
+                hub_reply = self.sender.send_jpg(text, jpg_buffer)          
+        except Exception as ex:  # add more specific exception, e.g. ZMQError, after testing
+            print("Exception at sender.send_jpg in REP_watcher function. {0}".format(ex))
+            self.fix_comm_link()
         self.REP_recd_time.append(datetime.utcnow())
         return hub_reply
 
@@ -360,8 +401,8 @@ class ImageNode:
         self.REQ_sent_time.append(datetime.utcnow())  # utcnow 2x faster than now
         try:
             hub_reply = self.sender.send_image(text, image)
-        except:  # add more specific exception, e.g. ZMQError, after testing
-            print("Exception at sender.send_image in REP_watcher function.")
+        except Exception as ex:  # add more specific exception, e.g. ZMQError, after testing
+            print("Exception at sender.send_jpg in REP_watcher function. {0}".format(ex))
             self. fix_comm_link()
         self.REP_recd_time.append(datetime.utcnow())
         return hub_reply
@@ -481,9 +522,9 @@ class ImageNode:
             light.turn_off()
         if settings.sensors or settings.lights:
             GPIO.cleanup()
-        if self.health.stall_p:
-            self.health.stall_p.terminate()
-            self.health.stall_p.join()
+        # if self.health.stall_p:
+        #     self.health.stall_p.terminate()
+        #     self.health.stall_p.join()
         if settings.send_threading:
             self.send_q.stop_sending()
         self.sender.zmq_socket.setsockopt(zmq.LINGER, 0)  # prevents ZMQ hang on exit
@@ -1069,7 +1110,7 @@ class Detector:
         self.current_state = 'unknown'
         self.last_state = 'unknown'
 
-        self.msg_image = np.zeros((2, 2), dtype="uint8")  # blank image tiny
+        self.msg_image = np.zeros((3,3,), dtype="uint8")  # blank image tiny
         if self.send_test_images:
             # set the blank image wide enough to hold message of send_test_images
             self.msg_image = np.zeros((5, 320), dtype="uint8")  # blank image wide
@@ -1191,9 +1232,9 @@ class Detector:
         #####
 
         # if we are sending images continuously, append current image to send_q
-        if self.frame_count == -1:  # -1 code ==> send all frames continuously
-            text_and_image = (camera.text, image)
-            send_q.append(text_and_image)  # send current image
+        #if self.frame_count == -1:  # -1 code ==> send all frames continuously
+        text_and_image = (camera.text + "|monitor", image)
+        send_q.append(text_and_image)  # send current image
 
         # crop ROI & convert to grayscale & apply GaussianBlur
         x1, y1 = self.top_left
@@ -1349,6 +1390,7 @@ class Settings:
             raise KeyboardInterrupt
         if 'hub_address' in self.config:
             self.hub_address = self.config['hub_address']['H1']
+            self.monitor_address = self.config['hub_address']['H2']
             # TODO add read and store H2 and H3 hub addresses
         else:
             self.print_settings('"hub_address" is a required settings section but not present.')
